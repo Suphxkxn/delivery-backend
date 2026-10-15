@@ -1,14 +1,12 @@
 import express from "express";
 import cors from "cors";
 import { router as index } from "./controller/index";
-import { router as auth } from "./controller/auth";
 import { router as settings } from "./controller/settings";
 import { router as customers } from "./controller/customers";
 import { router as order } from "./controller/order";
 import { router as dispatch } from "./controller/dispatch";
 import { router as jobs } from "./controller/jobs";
 import { router as dashboard } from "./controller/dashboard";
-import { requireOwner } from "./utils/auth";
 import { errorHandler } from "./utils/http";
 
 export const app = express();
@@ -29,14 +27,13 @@ app.use("/", index);
 
 // เรียกได้ทั้ง /customers และ /api/v1/customers
 for (const base of ["", "/api/v1"]) {
-  app.use(`${base}/auth`, auth);
-  app.use(`${base}/public`, jobs); // ไรเดอร์ ไม่ต้อง login
-  app.use(`${base}/settings`, requireOwner, settings);
-  app.use(`${base}/customers`, requireOwner, customers);
-  app.use(`${base}/order`, requireOwner, order);
-  app.use(`${base}/orders`, requireOwner, order);
-  app.use(`${base}/dispatch-plans`, requireOwner, dispatch);
-  app.use(`${base}/dashboard`, requireOwner, dashboard);
+  app.use(`${base}/public`, jobs); // ใบงานไรเดอร์
+  app.use(`${base}/settings`, settings);
+  app.use(`${base}/customers`, customers);
+  app.use(`${base}/order`, order);
+  app.use(`${base}/orders`, order);
+  app.use(`${base}/dispatch-plans`, dispatch);
+  app.use(`${base}/dashboard`, dashboard);
 }
 
 app.use((req, res) => {

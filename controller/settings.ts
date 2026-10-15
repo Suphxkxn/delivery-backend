@@ -62,8 +62,8 @@ router.put("/", async (req, res) => {
   if (errors.length) throw new AppError(400, "VALIDATION", errors.join("; "));
 
   await conn.query(
-    `UPDATE shop_settings SET ${sets.map(([c]) => `${c} = ?`).join(", ")}, updated_by = ? WHERE setting_id = 1`,
-    [...sets.map(([, v]) => v), req.user!.id],
+    `UPDATE shop_settings SET ${sets.map(([c]) => `${c} = ?`).join(", ")} WHERE setting_id = 1`,
+    sets.map(([, v]) => v),
   );
   res.json({ data: await getSettings() });
 });

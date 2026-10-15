@@ -1,7 +1,6 @@
 -- =====================================================================
 -- ระบบจัดเส้นทางส่งข้าวกล่อง: schema + ข้อมูลตั้งต้น (MySQL 8)
 -- ใช้กับฐานข้อมูลใหม่/ว่าง: รันไฟล์นี้ทั้งไฟล์ได้เลย (รันซ้ำได้ ไม่ทำข้อมูลซ้ำ)
--- login: owner / owner1234
 -- ถ้ามีตาราง orders แบบเก่า (คอลัมน์ is_simulated) ให้ใช้ `npm run db:setup`
 -- แทน หรือรัน DROP TABLE orders; ก่อน
 -- =====================================================================
@@ -93,7 +92,7 @@ CREATE TABLE IF NOT EXISTS dispatch_plans (
   profit DECIMAL(10,2) NOT NULL,
   is_on_time TINYINT(1) NOT NULL,
   compute_ms INT UNSIGNED NULL,
-  created_by INT UNSIGNED NOT NULL,
+  created_by INT UNSIGNED NULL,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   confirmed_at DATETIME NULL,
   confirmed_date DATE AS (IF(status = 'CONFIRMED', delivery_date, NULL)) STORED,
@@ -141,9 +140,6 @@ CREATE TABLE IF NOT EXISTS dispatch_stops (
 -- ---------------------------------------------------------------------
 -- ข้อมูลตั้งต้น
 -- ---------------------------------------------------------------------
-INSERT IGNORE INTO users (username, password_hash, display_name, role)
-VALUES ('owner', 'scrypt$4a1df036e605427e6d6b1f33626f8598$a65bd8902ee7bc7eec83cc2f813b9cb4788f95b5650f251c15e1ee26348d3f2b8947d973cbd37bb7ec031e393f8233deed9bb8fd21e8e481429dfa55aa896ea9', 'เจ้าของร้าน', 'OWNER');
-
 -- พิกัดร้านเป็นค่าสมมติ (มมส. ขามเรียง) แก้ได้ที่ PUT /settings
 INSERT IGNORE INTO shop_settings (setting_id, shop_name, depot_lat, depot_lng)
 VALUES (1, 'ข้าวกล่องเดลิเวอรี', 16.2467, 103.2554);

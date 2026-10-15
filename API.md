@@ -1,19 +1,13 @@
 # API สำหรับ Frontend
 
 Base URL: `http://localhost:3000` (ทุก path ใช้ได้ทั้ง `/xxx` และ `/api/v1/xxx`)
-Login: `owner` / `owner1234`  ·  วันที่ใช้ `YYYY-MM-DD` (ไม่ส่ง = วันนี้เวลาไทย)
+วันที่ใช้ `YYYY-MM-DD` (ไม่ส่ง = วันนี้เวลาไทย)
 
-ทุก route ยกเว้น `/auth/login`, `/public/*`, `/health` ต้องมี header `Authorization: Bearer <accessToken>`
+**ไม่มี login / ไม่ต้องใช้ token** เรียกทุก endpoint ได้โดยตรง
 
 **รูปแบบ error ทุก endpoint** `{ "error": { "code", "message" } }`
 **รูปแบบสำเร็จ** `{ "data": ..., "meta": ... }` (ยกเว้น `DELETE` ที่ตอบ 204 ไม่มี body และ `/public/jobs` ที่ตอบ object ตรง ๆ)
 **ชื่อ field** camelCase ทั้ง body ที่ส่งและผลที่ตอบ ยกเว้นรายการออเดอร์ (`/orders`) ที่ field ตอบกลับยังเป็น snake_case (`order_id`, `box_count`, `first_name`) ดูหัวข้อ Orders
-
-## Auth
-| Method | Path | Body | ตอบ |
-|---|---|---|---|
-| POST | /auth/login | `{username,password}` | `{data:{accessToken,expiresIn,user}}` · 400/401/429 (5 ครั้ง/นาที) |
-| GET | /auth/me | – | `{data:{user}}` |
 
 ## Settings
 | GET /settings | → `{data:{shopName,depotLat,depotLng,boxPrice,boxCost,riderBaseFee,riderRatePerKmBox,riderSpeedKmh,serviceTimeMin,maxOrdersRider,departTime,deadlineTime,serviceRadiusKm,roadFactor}}` |
@@ -63,8 +57,8 @@ Login: `owner` / `owner1234`  ·  วันที่ใช้ `YYYY-MM-DD` (ไ�
 planSummary: `planId, deliveryDate, status, objective, variantNo, orderCount, totalBoxes, riderCount, totalDistanceM, latestArrival, revenue, foodCost, deliveryCost, profit, isOnTime, computeMs`
 "คำนวณใหม่" = ส่ง `recalculate:true` (ได้แผนที่ต่างจากร่างเดิม)
 
-## Rider (public ไม่ต้อง login)
-`GET /public/jobs/:jobCode` (30 ครั้ง/นาที/IP, ไม่แยกตัวพิมพ์)
+## Rider (ใบงาน)
+`GET /public/jobs/:jobCode` (จำกัด 30 ครั้ง/นาที/IP, ไม่แยกตัวพิมพ์)
 → `{jobCode,date,departTime,totalBoxes,riderName,depot:{lat,lng},stops:[{seq,customerName,phone,lat,lng,boxCount,eta}]}`
 404 ไม่พบ/ถูกยกเลิก · 410 หมดอายุ (พ้นวันส่ง) · 429
 

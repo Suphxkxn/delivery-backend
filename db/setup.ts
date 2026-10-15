@@ -1,6 +1,5 @@
 // สร้าง/ปรับตารางตาม ERD แล้วใส่ข้อมูลตั้งต้น  รัน: npm run db:setup (รันซ้ำได้)
 import { conn } from "../dbconnect";
-import { hashPassword } from "../utils/auth";
 
 async function columnExists(table: string, column: string): Promise<boolean> {
   const [rows] = await conn.query(
@@ -162,7 +161,7 @@ async function main() {
     profit DECIMAL(10,2) NOT NULL,
     is_on_time TINYINT(1) NOT NULL,
     compute_ms INT UNSIGNED NULL,
-    created_by INT UNSIGNED NOT NULL,
+    created_by INT UNSIGNED NULL,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     confirmed_at DATETIME NULL,
     confirmed_date DATE AS (IF(status = 'CONFIRMED', delivery_date, NULL)) STORED,
@@ -170,6 +169,8 @@ async function main() {
     KEY idx_plans_date_status (delivery_date, status),
     CONSTRAINT fk_plans_user FOREIGN KEY (created_by) REFERENCES users(user_id)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+
+  await conn.query("ALTER TABLE dispatch_plans MODIFY created_by INT UNSIGNED NULL");
 
   await conn.query(`CREATE TABLE IF NOT EXISTS dispatch_routes (
     route_id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
@@ -208,11 +209,6 @@ async function main() {
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
 
   console.log("ข้อมูลตั้งต้น...");
-  const ownerPass = process.env.OWNER_PASSWORD ?? "owner1234";
-  await conn.query(
-    "INSERT IGNORE INTO users (username, password_hash, display_name, role) VALUES ('owner', ?, 'เจ้าของร้าน', 'OWNER')",
-    [hashPassword(ownerPass)],
-  );
   // พิกัดร้านเป็นค่าสมมติ (บริเวณ มมส. ขามเรียง) แก้ได้ที่ PUT /settings
   await conn.query(
     `INSERT IGNORE INTO shop_settings (setting_id, shop_name, depot_lat, depot_lng)
@@ -247,7 +243,7 @@ async function main() {
     console.log(`  ${t}: ${(r as any[])[0].n} แถว`);
   }
   await conn.end();
-  console.log("เสร็จสิ้น  (login: owner / " + (process.env.OWNER_PASSWORD ? "ตาม OWNER_PASSWORD" : "owner1234") + ")");
+  console.log("เสร็จสิ้น");
 }
 
 main().catch((e) => {

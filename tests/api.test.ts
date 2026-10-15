@@ -2,15 +2,13 @@
 import assert from "node:assert/strict";
 
 const BASE = process.env.BASE ?? "http://localhost:3000";
-let token = "";
 let passed = 0;
 
-async function call(method: string, path: string, body?: unknown, auth = true) {
+async function call(method: string, path: string, body?: unknown, _auth = true) {
   const res = await fetch(BASE + path, {
     method,
     headers: {
       "Content-Type": "application/json",
-      ...(auth && token ? { Authorization: `Bearer ${token}` } : {}),
     },
     ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
   });
@@ -32,22 +30,10 @@ async function t(name: string, fn: () => Promise<void>) {
 }
 
 async function main() {
-  console.log("Auth");
-  await t("ไม่มี token -> 401", async () => assert.equal((await call("GET", "/customers", undefined, false)).status, 401));
-  await t("token ปลอม -> 401", async () => {
-    token = "abc.def.ghi";
-    assert.equal((await call("GET", "/customers")).status, 401);
-    token = "";
-  });
-  await t("login ผิด -> 401", async () =>
-    assert.equal((await call("POST", "/auth/login", { username: "owner", password: "x" }, false)).status, 401));
-  await t("login ถูก -> 200 + token", async () => {
-    const r = await call("POST", "/auth/login", { username: "owner", password: "owner1234" }, false);
-    assert.equal(r.status, 200);
-    token = r.json.data.accessToken;
-    assert.ok(token);
-  });
-  await t("/auth/me", async () => assert.equal((await call("GET", "/auth/me")).json.data.user.username, "owner"));
+  console.log("Health / ไม่ต้อง login");
+  await t("/health ok", async () => assert.equal((await call("GET", "/health")).json.status, "ok"));
+  await t("ไม่มี token ก็เรียก API ได้ (ไม่มี auth)", async () => assert.equal((await call("GET", "/customers")).status, 200));
+  await t("/auth/login ไม่มีแล้ว -> 404", async () => assert.equal((await call("POST", "/auth/login", {})).status, 404));
 
   console.log("Settings");
   await t("GET settings", async () => {

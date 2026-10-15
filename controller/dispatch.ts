@@ -203,7 +203,7 @@ router.post("/", async (req, res) => {
         [
           date, obj, variant, JSON.stringify(params),
           orders.length, r.totalBoxes, r.routes.length, r.totalDistanceM, minToTime(r.latestArrivalMin),
-          r.revenue, r.foodCost, r.deliveryCost, r.profit, r.onTime ? 1 : 0, ms, req.user!.id,
+          r.revenue, r.foodCost, r.deliveryCost, r.profit, r.onTime ? 1 : 0, ms, null,
         ],
       );
       const planId = (ins as any).insertId as number;
