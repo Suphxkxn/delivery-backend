@@ -2,201 +2,282 @@ import express from "express";
 import { conn } from "../dbconnect";
 import { OrderDetail } from "../model/order";
 import { distanceKmSql, parseLatLng } from "../utils/geo";
+import { AppError, parseDate, parsePage } from "../utils/http";
+import { dropDrafts, dropStalePlans, isDateLocked } from "../utils/plans";
+import { getSettings } from "../utils/settings";
 
 export const router = express.Router();
 
 const ORDER_DETAIL_SQL = `
-  SELECT o.order_id, o.customer_id, o.box_count, o.is_simulated, o.created_at,
-         c.first_name, c.last_name, c.phone_number, c.latitude, c.longitude
+  SELECT o.order_id, o.order_no, o.customer_id, o.delivery_date, o.box_count,
+         o.unit_price, o.unit_cost, o.delivery_lat, o.delivery_lng,
+         o.source, o.status, o.created_at,
+         c.first_name, c.last_name, c.phone_number
   FROM orders o
   JOIN customers c ON c.customer_id = o.customer_id`;
 
-function isValidBoxCount(value: unknown): boolean {
+function checkBoxCount(value: unknown): number {
   const n = Number(value);
-  return Number.isInteger(n) && n >= 1 && n <= 3;
+  if (!Number.isInteger(n) || n < 1 || n > 3) {
+    throw new AppError(400, "VALIDATION", "boxCount ต้องเป็นจำนวนเต็ม 1-3");
+  }
+  return n;
 }
 
 function randomInt(min: number, max: number): number {
   return min + Math.floor(Math.random() * (max - min + 1));
 }
 
-router.get("/", async (req, res) => {
-  try {
-    let sql = ORDER_DETAIL_SQL;
-    const params: unknown[] = [];
-    if (req.query.simulated === "1" || req.query.simulated === "0") {
-      sql += " WHERE o.is_simulated = ?";
-      params.push(Number(req.query.simulated));
-    }
-    sql += " ORDER BY o.order_id";
-    const [rows] = await conn.query(sql, params);
-    res.json(rows as OrderDetail[]);
-  } catch (error) {
-    res.status(500).json({ error: "Internal server error" });
+async function assertNotLocked(date: string) {
+  if (await isDateLocked(date)) {
+    throw new AppError(409, "ORDER_LOCKED", "วันนี้ยืนยันแผนแล้ว ต้องยกเลิกแผนก่อนจึงจะแก้ออเดอร์ได้");
   }
+}
+
+// เลขออเดอร์ YYMMDD-NNN ต่อจากเลขสูงสุดของวันนั้น
+async function nextOrderNos(date: string, count: number): Promise<string[]> {
+  const prefix = date.slice(2).replace(/-/g, "");
+  const [rows] = await conn.query(
+    "SELECT MAX(CAST(SUBSTRING(order_no, 8) AS UNSIGNED)) AS m FROM orders WHERE order_no LIKE ?",
+    [`${prefix}-%`],
+  );
+  const start = Number((rows as any[])[0]?.m ?? 0);
+  return Array.from({ length: count }, (_, i) => `${prefix}-${String(start + i + 1).padStart(3, "0")}`);
+}
+
+async function findOrder(id: unknown): Promise<OrderDetail> {
+  const [rows] = await conn.query(`${ORDER_DETAIL_SQL} WHERE o.order_id = ?`, [id]);
+  const o = (rows as OrderDetail[])[0];
+  if (!o) throw new AppError(404, "NOT_FOUND", "Order not found");
+  return o;
+}
+
+router.get("/", async (req, res) => {
+  const date = parseDate(req.query.date);
+  const { page, limit, offset } = parsePage(req.query, 100, 500);
+  const where = ["o.delivery_date = ?"];
+  const params: unknown[] = [date];
+  if (req.query.source !== undefined) {
+    if (req.query.source !== "MANUAL" && req.query.source !== "SIMULATED")
+      throw new AppError(400, "VALIDATION", "source ต้องเป็น MANUAL หรือ SIMULATED");
+    where.push("o.source = ?");
+    params.push(req.query.source);
+  }
+  if (req.query.status !== undefined) {
+    if (req.query.status !== "PENDING" && req.query.status !== "DISPATCHED")
+      throw new AppError(400, "VALIDATION", "status ต้องเป็น PENDING หรือ DISPATCHED");
+    where.push("o.status = ?");
+    params.push(req.query.status);
+  }
+  const q = String(req.query.q ?? "").trim();
+  if (q) {
+    const like = `%${q.replace(/[\\%_]/g, "\\$&")}%`;
+    where.push("(c.first_name LIKE ? OR c.last_name LIKE ? OR o.order_no LIKE ?)");
+    params.push(like, like, like);
+  }
+  const w = where.join(" AND ");
+  const [rows] = await conn.query(`${ORDER_DETAIL_SQL} WHERE ${w} ORDER BY o.order_id LIMIT ? OFFSET ?`, [
+    ...params,
+    limit,
+    offset,
+  ]);
+  const [sum] = await conn.query(
+    `SELECT COUNT(*) AS total, COALESCE(SUM(o.box_count),0) AS boxes,
+            COALESCE(SUM(o.box_count * o.unit_price),0) AS revenue,
+            COALESCE(SUM(o.box_count * o.unit_cost),0) AS foodCost
+     FROM orders o JOIN customers c ON c.customer_id = o.customer_id WHERE ${w}`,
+    params,
+  );
+  const s = (sum as any[])[0];
+  res.json({
+    data: rows,
+    meta: {
+      page,
+      limit,
+      total: s.total,
+      totalBoxes: Number(s.boxes),
+      revenue: Number(s.revenue),
+      foodCost: Number(s.foodCost),
+      locked: await isDateLocked(date),
+    },
+  });
 });
 
-
+// จำลองออเดอร์ 20-30 รายการ
 router.post("/simulate", async (req, res) => {
+  const count = req.body?.count === undefined ? randomInt(20, 30) : Number(req.body.count);
+  if (!Number.isInteger(count) || count < 20 || count > 30) {
+    throw new AppError(400, "VALIDATION", "count ต้องเป็นจำนวนเต็ม 20-30");
+  }
+  const mode = req.body?.mode ?? "append";
+  if (mode !== "append" && mode !== "replace") {
+    throw new AppError(400, "VALIDATION", "mode ต้องเป็น append หรือ replace");
+  }
+  const date = parseDate(req.body?.deliveryDate);
+  await assertNotLocked(date);
+  const st = await getSettings();
+
+  const c = await conn.getConnection();
   try {
-    const count = req.body?.count === undefined ? randomInt(20, 30) : Number(req.body.count);
-    if (!Number.isInteger(count) || count < 20 || count > 30) {
-      return res.status(400).json({ error: "count ต้องเป็นจำนวนเต็ม 20-30" });
+    await c.beginTransaction();
+    if (mode === "replace") {
+      await dropStalePlans(date, c);
+      await c.query(
+        "DELETE FROM orders WHERE delivery_date = ? AND source = 'SIMULATED' AND status = 'PENDING'",
+        [date],
+      );
     }
+    await dropDrafts(date, c);
 
-    const [customerRows] = await conn.query(
-      "SELECT customer_id FROM customers ORDER BY RAND() LIMIT ?",
-      [count],
+    // สุ่มลูกค้าในรัศมีให้บริการ ที่ยังไม่มีออเดอร์ของวันนั้น
+    const [cust] = await c.query(
+      `SELECT * FROM (
+         SELECT c.customer_id, c.latitude, c.longitude,
+                ${distanceKmSql("c.latitude", "c.longitude")} AS d
+         FROM customers c
+         WHERE c.customer_id NOT IN (SELECT customer_id FROM orders WHERE delivery_date = ?)
+       ) t WHERE d <= ? ORDER BY RAND() LIMIT ?`,
+      [st.depotLat, st.depotLat, st.depotLng, date, st.serviceRadiusKm, count],
     );
-    const customers = customerRows as { customer_id: number }[];
+    const customers = cust as { customer_id: number; latitude: number; longitude: number }[];
     if (customers.length < count) {
-      return res.status(400).json({
-        error: `มีลูกค้าแค่ ${customers.length} คน จำลอง ${count} ออเดอร์ไม่ได้ (เพิ่มลูกค้าก่อน)`,
-      });
+      await c.rollback();
+      throw new AppError(
+        422,
+        "NOT_ENOUGH_CUSTOMERS",
+        `มีลูกค้าที่ใช้จำลองได้แค่ ${customers.length} คน (ต้องการ ${count}) กรุณาเพิ่มลูกค้าก่อน`,
+      );
     }
-
-    const values = customers.map((c) => [c.customer_id, randomInt(1, 3), 1]);
-
-    const [result] = await conn.query(
-      "INSERT INTO orders (customer_id, box_count, is_simulated) VALUES ?",
+    const nos = await nextOrderNos(date, count);
+    const values = customers.map((cu, i) => [
+      nos[i],
+      cu.customer_id,
+      date,
+      randomInt(1, 3),
+      st.boxPrice,
+      st.boxCost,
+      cu.latitude,
+      cu.longitude,
+      "SIMULATED",
+    ]);
+    await c.query(
+      `INSERT INTO orders (order_no, customer_id, delivery_date, box_count, unit_price, unit_cost,
+                           delivery_lat, delivery_lng, source) VALUES ?`,
       [values],
     );
-    const insertResult = result as any;
-
-    const [rows] = await conn.query(
-      `${ORDER_DETAIL_SQL}
-       WHERE o.order_id >= ? AND o.is_simulated = 1 AND o.customer_id IN (?)
-       ORDER BY o.order_id`,
-      [insertResult.insertId, customers.map((c) => c.customer_id)],
-    );
-    const orders = rows as OrderDetail[];
-
-    res.status(201).json({
-      affected_row: insertResult.affectedRows,
-      total_boxes: orders.reduce((sum, o) => sum + o.box_count, 0),
-      orders,
-    });
-  } catch (error) {
-    res.status(500).json({ error: "Internal server error" });
+    await c.commit();
+  } catch (e) {
+    await c.rollback().catch(() => {});
+    throw e;
+  } finally {
+    c.release();
   }
+
+  const [rows] = await conn.query(
+    `${ORDER_DETAIL_SQL} WHERE o.delivery_date = ? AND o.source = 'SIMULATED' ORDER BY o.order_id`,
+    [date],
+  );
+  const orders = rows as OrderDetail[];
+  res.status(201).json({
+    data: orders,
+    summary: { count: orders.length, totalBoxes: orders.reduce((s, o) => s + o.box_count, 0) },
+  });
 });
 
-
-router.delete("/simulate", async (req, res) => {
-  try {
-    const [result] = await conn.query("DELETE FROM orders WHERE is_simulated = 1");
-    const deleteResult = result as any;
-    res.status(200).json({ affected_row: deleteResult.affectedRows });
-  } catch (error) {
-    res.status(500).json({ error: "Internal server error" });
-  }
-});
+// ล้างเฉพาะออเดอร์จำลอง (ไม่แตะออเดอร์จริง)
+async function clearSimulated(req: express.Request, res: express.Response) {
+  const date = parseDate(req.query.date);
+  await assertNotLocked(date);
+  await dropStalePlans(date);
+  const [result] = await conn.query(
+    "DELETE FROM orders WHERE delivery_date = ? AND source = 'SIMULATED' AND status = 'PENDING'",
+    [date],
+  );
+  await dropDrafts(date);
+  res.status(200).json({ deletedCount: (result as any).affectedRows });
+}
+router.delete("/simulated", clearSimulated);
+router.delete("/simulate", clearSimulated);
 
 router.get("/nearby", async (req, res) => {
-  try {
-    const point = parseLatLng(req.query.lat, req.query.lng);
-    if (!point) {
-      return res.status(400).json({ error: "ต้องส่ง lat และ lng เป็นตัวเลข เช่น ?lat=16.2467&lng=103.2554" });
-    }
-    const radius = req.query.radius === undefined ? 2 : Number(req.query.radius);
-    if (isNaN(radius) || radius <= 0) {
-      return res.status(400).json({ error: "radius ต้องเป็นตัวเลขมากกว่า 0" });
-    }
-
-    const sql = `
-      SELECT * FROM (
-        SELECT o.order_id, o.customer_id, o.box_count, o.is_simulated, o.created_at,
-               c.first_name, c.last_name, c.phone_number, c.latitude, c.longitude,
-               ROUND(${distanceKmSql("c.latitude", "c.longitude")}, 3) AS distance_km
-        FROM orders o
-        JOIN customers c ON c.customer_id = o.customer_id
-      ) AS t
-      WHERE distance_km <= ?
-      ORDER BY distance_km`;
-    const [rows] = await conn.query(sql, [point.lat, point.lat, point.lng, radius]);
-    const orders = rows as OrderDetail[];
-    res.json({
-      count: orders.length,
-      total_boxes: orders.reduce((sum, o) => sum + o.box_count, 0),
-      orders,
-    });
-  } catch (error) {
-    res.status(500).json({ error: "Internal server error" });
+  const point = parseLatLng(req.query.lat, req.query.lng);
+  if (!point) {
+    throw new AppError(400, "VALIDATION", "ต้องส่ง lat และ lng เป็นตัวเลข เช่น ?lat=16.2467&lng=103.2554");
   }
+  const radius = req.query.radiusKm ?? req.query.radius;
+  const radiusKm = radius === undefined ? 2 : Number(radius);
+  if (isNaN(radiusKm) || radiusKm <= 0) {
+    throw new AppError(400, "VALIDATION", "radiusKm ต้องเป็นตัวเลขมากกว่า 0");
+  }
+  const date = parseDate(req.query.date);
+  const sql = `
+    SELECT * FROM (
+      SELECT o.order_id, o.order_no, o.customer_id, o.delivery_date, o.box_count, o.source, o.status,
+             o.delivery_lat, o.delivery_lng, c.first_name, c.last_name, c.phone_number,
+             ROUND(${distanceKmSql("o.delivery_lat", "o.delivery_lng")} * 1000) AS distance_m
+      FROM orders o JOIN customers c ON c.customer_id = o.customer_id
+      WHERE o.delivery_date = ?
+    ) AS t
+    WHERE distance_m <= ?
+    ORDER BY distance_m`;
+  const [rows] = await conn.query(sql, [point.lat, point.lat, point.lng, date, radiusKm * 1000]);
+  res.json({ data: rows });
 });
 
 router.get("/:id", async (req, res) => {
-  try {
-    const [rows] = await conn.query(`${ORDER_DETAIL_SQL} WHERE o.order_id = ?`, [req.params.id]);
-    const orders = rows as OrderDetail[];
-    if (orders.length === 0) {
-      return res.status(404).json({ error: "Order not found" });
-    }
-    res.json(orders[0]);
-  } catch (error) {
-    res.status(500).json({ error: "Internal server error" });
-  }
+  res.json({ data: await findOrder(req.params.id) });
 });
 
-
 router.post("/", async (req, res) => {
-  try {
-    const customerId = Number(req.body?.customer_id);
-    const boxCount = req.body?.box_count;
-    if (!Number.isInteger(customerId) || customerId < 1) {
-      return res.status(400).json({ error: "customer_id ต้องเป็นจำนวนเต็ม" });
-    }
-    if (!isValidBoxCount(boxCount)) {
-      return res.status(400).json({ error: "box_count ต้องเป็นจำนวนเต็ม 1-3" });
-    }
-
-    const [result] = await conn.query(
-      "INSERT INTO orders (customer_id, box_count) VALUES (?, ?)",
-      [customerId, Number(boxCount)],
-    );
-    const insertResult = result as any;
-    res.status(201).json({
-      affected_row: insertResult.affectedRows,
-      last_idx: insertResult.insertId,
-    });
-  } catch (error: any) {
-    if (error.code === "ER_NO_REFERENCED_ROW_2") {
-      return res.status(404).json({ error: "Customer not found" });
-    }
-    res.status(500).json({ error: "Internal server error" });
+  const customerId = Number(req.body?.customerId ?? req.body?.customer_id);
+  if (!Number.isInteger(customerId) || customerId < 1) {
+    throw new AppError(400, "VALIDATION", "customerId ต้องเป็นจำนวนเต็ม");
   }
+  const boxCount = checkBoxCount(req.body?.boxCount ?? req.body?.box_count);
+  const date = parseDate(req.body?.deliveryDate);
+  await assertNotLocked(date);
+
+  const [cu] = await conn.query("SELECT latitude, longitude FROM customers WHERE customer_id = ?", [customerId]);
+  const customer = (cu as any[])[0];
+  if (!customer) throw new AppError(404, "NOT_FOUND", "Customer not found");
+  const st = await getSettings();
+
+  // เลขออเดอร์อาจชนกันถ้ากดพร้อมกัน จึง retry
+  let insertId = 0;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const [no] = await nextOrderNos(date, 1);
+    try {
+      const [result] = await conn.query(
+        `INSERT INTO orders (order_no, customer_id, delivery_date, box_count, unit_price, unit_cost,
+                             delivery_lat, delivery_lng, source)
+         VALUES (?,?,?,?,?,?,?,?, 'MANUAL')`,
+        [no, customerId, date, boxCount, st.boxPrice, st.boxCost, customer.latitude, customer.longitude],
+      );
+      insertId = (result as any).insertId;
+      break;
+    } catch (e: any) {
+      if (e.code !== "ER_DUP_ENTRY" || attempt === 4) throw e;
+    }
+  }
+  await dropDrafts(date);
+  res.status(201).json({ data: await findOrder(insertId) });
 });
 
 router.patch("/:id", async (req, res) => {
-  try {
-    const boxCount = req.body?.box_count;
-    if (!isValidBoxCount(boxCount)) {
-      return res.status(400).json({ error: "box_count ต้องเป็นจำนวนเต็ม 1-3" });
-    }
-    const [result] = await conn.query("UPDATE orders SET box_count = ? WHERE order_id = ?", [
-      Number(boxCount),
-      req.params.id,
-    ]);
-    const updateResult = result as any;
-    if (updateResult.affectedRows === 0) {
-      return res.status(404).json({ error: "Order not found" });
-    }
-    res.status(200).json({ affected_row: updateResult.affectedRows });
-  } catch (error) {
-    res.status(500).json({ error: "Internal server error" });
-  }
+  const boxCount = checkBoxCount(req.body?.boxCount ?? req.body?.box_count);
+  const order = await findOrder(req.params.id);
+  const date = String(order.delivery_date);
+  await assertNotLocked(date);
+  await conn.query("UPDATE orders SET box_count = ? WHERE order_id = ?", [boxCount, order.order_id]);
+  await dropDrafts(date);
+  res.json({ data: await findOrder(order.order_id) });
 });
 
-
 router.delete("/:id", async (req, res) => {
-  try {
-    const [result] = await conn.query("DELETE FROM orders WHERE order_id = ?", [req.params.id]);
-    const deleteResult = result as any;
-    if (deleteResult.affectedRows === 0) {
-      return res.status(404).json({ error: "Order not found" });
-    }
-    res.status(200).json({ affected_row: deleteResult.affectedRows });
-  } catch (error) {
-    res.status(500).json({ error: "Internal server error" });
-  }
+  const order = await findOrder(req.params.id);
+  const date = String(order.delivery_date);
+  await assertNotLocked(date);
+  await dropStalePlans(date);
+  await conn.query("DELETE FROM orders WHERE order_id = ?", [order.order_id]);
+  res.status(204).end();
 });
