@@ -66,41 +66,67 @@ async function main() {
   console.log("Customers");
   const phone = "08" + String(Date.now()).slice(-8);
   let cid = 0;
-  await t("POST ลูกค้า -> 201", async () => {
+  await t("POST ลูกค้า -> 201 camelCase + {data}", async () => {
     const r = await call("POST", "/customers", {
-      first_name: "ทดสอบ", last_name: "ระบบ", phone_number: phone, latitude: 16.25, longitude: 103.26,
+      firstName: "ทดสอบ", lastName: "ระบบ", phone, latitude: 16.25, longitude: 103.26,
     });
     assert.equal(r.status, 201);
-    cid = r.json.last_idx;
+    cid = r.json.data.customerId;
+    assert.ok(cid > 0);
+    assert.equal(r.json.data.firstName, "ทดสอบ");
+    assert.equal(r.json.data.phone, phone);
   });
-  await t("POST เบอร์ซ้ำ -> 409", async () =>
-    assert.equal(
-      (await call("POST", "/customers", { first_name: "a", last_name: "b", phone_number: phone, latitude: 16.25, longitude: 103.26 })).status,
-      409,
-    ));
-  await t("GET /customers/search?keyword=ทดสอบ", async () => {
-    const r = await call("GET", "/customers/search?keyword=" + encodeURIComponent("ทดสอบ"));
-    assert.ok(r.json.length >= 1);
+  await t("POST ข้อมูลผิด -> 400 รูปแบบ error ใหม่", async () => {
+    const r = await call("POST", "/customers", { firstName: "", lastName: "x", phone: "123", latitude: 99, longitude: 103 });
+    assert.equal(r.status, 400);
+    assert.equal(r.json.error.code, "VALIDATION");
+    assert.ok(r.json.error.message.includes("firstName") && r.json.error.message.includes("phone"));
   });
-  await t("search SQL injection -> ไม่พบ ไม่ error", async () => {
-    const r = await call("GET", "/customers/search?keyword=" + encodeURIComponent("' OR 1=1 --"));
+  await t("POST เบอร์ซ้ำ -> 409 PHONE_EXISTS", async () => {
+    const r = await call("POST", "/customers", { firstName: "a", lastName: "b", phone, latitude: 16.25, longitude: 103.26 });
+    assert.equal(r.status, 409);
+    assert.equal(r.json.error.code, "PHONE_EXISTS");
+  });
+  await t("GET /customers แบ่งหน้า + meta", async () => {
+    const r = await call("GET", "/customers?page=1&limit=5&sort=name");
     assert.equal(r.status, 200);
-    assert.equal(r.json.length, 0);
+    assert.ok(r.json.data.length <= 5);
+    assert.ok(r.json.meta.total >= 1);
+    assert.equal(r.json.meta.limit, 5);
+    assert.equal((await call("GET", "/customers?sort=bad")).status, 400);
   });
-  await t("nearby 1 กม. เรียงใกล้->ไกล", async () => {
-    const r = await call("GET", `/customers/nearby?lat=${settings.depotLat}&lng=${settings.depotLng}&radius=1`);
+  await t("ค้น q=ทดสอบ (ชื่อหรือนามสกุล)", async () => {
+    const r = await call("GET", "/customers?q=" + encodeURIComponent("ทดสอบ"));
+    assert.ok(r.json.data.length >= 1);
+    const r2 = await call("GET", "/customers?q=" + encodeURIComponent("ระบบ"));
+    assert.ok(r2.json.data.some((c: any) => c.customerId === cid), "ค้นจากนามสกุลได้");
+  });
+  await t("q เป็น SQL injection / wildcard -> ไม่พบ ไม่ error", async () => {
+    const r = await call("GET", "/customers?q=" + encodeURIComponent("' OR 1=1 --"));
     assert.equal(r.status, 200);
-    const d = r.json.map((c: any) => c.distance_km);
-    assert.ok(d.every((x: number) => x <= 1));
+    assert.equal(r.json.data.length, 0);
+    const w = await call("GET", "/customers?q=" + encodeURIComponent("%"));
+    assert.equal(w.json.data.length, 0, "% ต้องถูกมองเป็นตัวอักษร ไม่ใช่ wildcard");
+  });
+  await t("nearby 1 กม. เรียงใกล้->ไกล มี distanceM", async () => {
+    const r = await call("GET", `/customers/nearby?lat=${settings.depotLat}&lng=${settings.depotLng}&radiusKm=1`);
+    assert.equal(r.status, 200);
+    const d = r.json.data.map((c: any) => c.distanceM);
+    assert.ok(d.every((x: number) => x <= 1000));
     assert.deepEqual(d, [...d].sort((a: number, b: number) => a - b));
   });
-  await t("nearby ไม่ส่ง lat -> 400", async () => assert.equal((await call("GET", "/customers/nearby")).status, 400));
-  await t("PUT ลูกค้า", async () =>
-    assert.equal(
-      (await call("PUT", `/customers/${cid}`, { first_name: "ทดสอบ2", last_name: "ระบบ", phone_number: phone, latitude: 16.25, longitude: 103.26 })).status,
-      200,
-    ));
-  await t("GET ลูกค้า id ไม่มี -> 404", async () => assert.equal((await call("GET", "/customers/99999999")).status, 404));
+  await t("nearby ไม่ส่ง lat -> 400", async () => assert.equal((await call("GET", "/customers/nearby")).json.error.code, "VALIDATION"));
+  await t("PUT ลูกค้า -> 200 + ค่าใหม่", async () => {
+    const r = await call("PUT", `/customers/${cid}`, { firstName: "ทดสอบ2", lastName: "ระบบ", phone, latitude: 16.25, longitude: 103.26 });
+    assert.equal(r.status, 200);
+    assert.equal(r.json.data.firstName, "ทดสอบ2");
+  });
+  await t("PUT/GET ลูกค้า id ไม่มี -> 404 NOT_FOUND", async () => {
+    const g = await call("GET", "/customers/99999999");
+    assert.equal(g.status, 404);
+    assert.equal(g.json.error.code, "NOT_FOUND");
+    assert.equal((await call("PUT", "/customers/99999999", { firstName: "a", lastName: "b", phone: "0812345670", latitude: 1, longitude: 1 })).status, 404);
+  });
 
   console.log("Orders");
   const DATE = "2031-01-15"; // วันทดสอบ (ไม่ชนข้อมูลจริง)
@@ -257,15 +283,15 @@ async function main() {
     assert.equal(r.json.deletedCount, 25);
   });
   await t("ลบ order กับ ลูกค้าที่มีออเดอร์ได้/ไม่ได้ตามกฎ", async () => {
-    assert.equal((await call("DELETE", `/customers/${cid}`)).status, 409); // ยังมีออเดอร์
+    assert.equal((await call("DELETE", `/customers/${cid}`)).json.error.code, "CUSTOMER_HAS_ORDERS"); // ยังมีออเดอร์
     assert.equal((await call("DELETE", `/orders/${oid}`)).status, 204);
-    assert.equal((await call("DELETE", `/customers/${cid}`)).status, 200);
+    assert.equal((await call("DELETE", `/customers/${cid}`)).status, 204);
   });
   await t("ออเดอร์ไกลเกินส่งทัน -> 422 INFEASIBLE", async () => {
     const far = await call("POST", "/customers", {
-      first_name: "ไกล", last_name: "มาก", phone_number: "07" + String(Date.now()).slice(-8), latitude: 17.5, longitude: 104.5,
+      firstName: "ไกล", lastName: "มาก", phone: "07" + String(Date.now()).slice(-8), latitude: 17.5, longitude: 104.5,
     });
-    const fid = far.json.last_idx;
+    const fid = far.json.data.customerId;
     const o = await call("POST", "/orders", { customerId: fid, boxCount: 1, deliveryDate: "2031-01-16" });
     const r = await call("POST", "/dispatch-plans", { deliveryDate: "2031-01-16" });
     assert.equal(r.status, 422);

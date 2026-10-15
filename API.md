@@ -5,8 +5,9 @@ Login: `owner` / `owner1234`  ·  วันที่ใช้ `YYYY-MM-DD` (ไ�
 
 ทุก route ยกเว้น `/auth/login`, `/public/*`, `/health` ต้องมี header `Authorization: Bearer <accessToken>`
 
-**รูปแบบ error ใหม่** `{ "error": { "code", "message" } }`  
-**ข้อยกเว้น:** `/customers` ยังตอบ error แบบเก่า `{ "error": "ข้อความ" }` และใช้ field แบบ snake_case
+**รูปแบบ error ทุก endpoint** `{ "error": { "code", "message" } }`
+**รูปแบบสำเร็จ** `{ "data": ..., "meta": ... }` (ยกเว้น `DELETE` ที่ตอบ 204 ไม่มี body และ `/public/jobs` ที่ตอบ object ตรง ๆ)
+**ชื่อ field** camelCase ทั้ง body ที่ส่งและผลที่ตอบ ยกเว้นรายการออเดอร์ (`/orders`) ที่ field ตอบกลับยังเป็น snake_case (`order_id`, `box_count`, `first_name`) ดูหัวข้อ Orders
 
 ## Auth
 | Method | Path | Body | ตอบ |
@@ -19,18 +20,22 @@ Login: `owner` / `owner1234`  ·  วันที่ใช้ `YYYY-MM-DD` (ไ�
 |---|---|
 | PUT /settings | ส่งบางค่าหรือทั้งชุดก็ได้ → 200 / 400 |
 
-## Customers (snake_case, ตอบเป็น array ตรง ๆ)
+## Customers
+ลูกค้า: `{customerId, firstName, lastName, phone, latitude, longitude}`
+
 | Method | Path | หมายเหตุ |
 |---|---|---|
-| GET | /customers | ทั้งหมด |
-| GET | /customers/search?keyword= (หรือ `fname=`/`lname=`) | ค้นบางส่วนของชื่อหรือนามสกุล |
-| GET | /customers/nearby?lat=&lng=&radius=1 | กม. เรียงใกล้→ไกล มี `distance_km` |
-| GET | /customers/:id | 404 ถ้าไม่มี |
-| POST | /customers | `{first_name,last_name,phone_number,latitude,longitude}` → 201 `{affected_row,last_idx}` · 409 เบอร์ซ้ำ |
-| PUT | /customers/:id | body เหมือน POST |
-| DELETE | /customers/:id | 409 ถ้ามีออเดอร์ |
+| GET | /customers?q=&page=1&limit=20&sort=id | `q` ค้นบางส่วนของชื่อ **หรือ** นามสกุล · `sort` = `id` หรือ `name` · limit ≤ 500 · ตอบ `{data[], meta:{page,limit,total}}` |
+| GET | /customers/nearby?lat=&lng=&radiusKm=1 | เรียงใกล้→ไกล ตอบ `{data[{...,distanceM}]}` · 400 ถ้าไม่ส่ง lat/lng |
+| GET | /customers/:id | `{data}` · 404 `NOT_FOUND` |
+| POST | /customers | body `{firstName,lastName,phone,latitude,longitude}` → 201 `{data}` · 400 `VALIDATION` · 409 `PHONE_EXISTS` |
+| PUT | /customers/:id | body เหมือน POST → 200 `{data}` · 404 · 409 |
+| DELETE | /customers/:id | 204 · 404 · 409 `CUSTOMER_HAS_ORDERS` |
+
+กฎ validate: ชื่อ/นามสกุล 1–100 ตัว, `phone` ต้องเป็น `^0\d{8,9}$`, latitude ±90, longitude ±180
 
 ## Orders (`/orders` หรือ `/order`)
+หมายเหตุ: ออเดอร์ที่ตอบกลับมี field แบบ snake_case (`order_id`, `order_no`, `box_count`, `delivery_date`, `first_name`, `phone_number` ฯลฯ) ส่วน body ตอนสร้าง/แก้ใช้ camelCase (`customerId`, `boxCount`, `deliveryDate`)
 | Method | Path | หมายเหตุ |
 |---|---|---|
 | GET | /orders?date=&source=&status=&q=&page=&limit= | `{data[],meta:{page,limit,total,totalBoxes,revenue,foodCost,locked}}` |

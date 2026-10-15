@@ -12,10 +12,12 @@ import { requireOwner } from "./utils/auth";
 import { errorHandler } from "./utils/http";
 
 export const app = express();
+// อยู่หลัง proxy ของ Render: ใช้ IP จริงของผู้ใช้ (X-Forwarded-For) สำหรับ rate limit
+app.set("trust proxy", 1);
 
 app.use(
   cors({
-    origin: process.env.CORS_ORIGINS ? process.env.CORS_ORIGINS.split(",") : "*",
+    origin: "*", // อนุญาตทุก origin (frontend deploy แล้ว URL เปลี่ยนบ่อย) ใช้ Bearer token ไม่ใช่ cookie จึงไม่เสี่ยง CSRF
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
   })
